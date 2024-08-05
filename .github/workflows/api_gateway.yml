@@ -48,21 +48,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           outputs: |
-            type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest,annotation-index.org.opencontainers.image.description=API Gateway Service for LLM Infrastructure
-      
-      - name: Export digest
-        run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build-and-push.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
-      
-      - name: Merge and push manifest
-        env:
-          DOCKER_CLI_EXPERIMENTAL: enabled
-        run: |
-          docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-          $(jq -cr '.[] | select(.type=="registry") | .digest' <<< '${{ steps.build-and-push.outputs.metadata }}')
+            type=registry
+            name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+            annotation-index.org.opencontainers.image.description=API Gateway Service for LLM Infrastructure
 
       - name: Wait for image to be available
         run: |
