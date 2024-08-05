@@ -37,8 +37,17 @@ jobs:
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
+        id: push
         with:
           context: functions/0002_api_gateway
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ env.REGISTRY }}/${{ github.repository }}/api-gateway:latest
+      
+      - name: Attest
+        uses: actions/attest-build-provenance@v1
+        id: attest
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
