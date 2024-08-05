@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    paths:
+      - functions/0002_api_gateway/**  # Only trigger if there are changes in this directory
 
 jobs:
   build:
