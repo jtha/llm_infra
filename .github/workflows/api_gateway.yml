@@ -5,7 +5,10 @@ on:
     branches:
       - main
     paths:
-      - functions/0002_api_gateway/**  # Only trigger if there are changes in this directory
+      - 'functions/0002_api_gateway/main.py'
+      - 'functions/0002_api_gateway/db_util.py'
+      - 'functions/0002_api_gateway/requirements.txt'
+      - 'functions/0002_api_gateway/Dockerfile'
 
 env:
   REGISTRY: ghcr.io
@@ -37,17 +40,24 @@ jobs:
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
-        id: push
+        id: build-and-push
         with:
           context: functions/0002_api_gateway
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ env.REGISTRY }}/${{ github.repository }}/api-gateway:latest
+
+      - name: Wait for image to be available
+        run: |
+          echo "Waiting for image to be available..."
+          sleep 30
       
       - name: Attest
         uses: actions/attest-build-provenance@v1
         id: attest
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.push.outputs.digest }}
+          subject-digest: ${{ steps.build-and-push.outputs.digest }}
           push-to-registry: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
