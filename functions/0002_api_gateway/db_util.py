@@ -74,22 +74,28 @@ async def create_or_update_table(flattened_dict: List[Dict[str, Any]], table: st
         return
 
     keys = list(flattened_dict[0].keys())
-    columns = ', '.join(f"{asyncpg.identifier(key)} TEXT" for key in keys)
+    columns = ', '.join(f'"{key}" TEXT' for key in keys)
     primary_key = keys[0]
 
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute(f'CREATE TABLE IF NOT EXISTS {asyncpg.identifier(table)} ({columns}, PRIMARY KEY ({asyncpg.identifier(primary_key)}))')
+            # Create table if not exists
+            await conn.execute(f'CREATE TABLE IF NOT EXISTS "{table}" ({columns}, PRIMARY KEY ("{primary_key}"))')
 
+            # Prepare the insert/update query
             placeholders = ', '.join(f'${i+1}' for i in range(len(keys)))
-            values = [[str(model.get(key, '')) for key in keys] for model in flattened_dict]
-            await conn.executemany(f'''
-            INSERT INTO {asyncpg.identifier(table)} ({', '.join(asyncpg.identifier(key) for key in keys)})
+            update_set = ', '.join(f'"{key}" = EXCLUDED."{key}"' for key in keys)
+            query = f'''
+            INSERT INTO "{table}" ({', '.join(f'"{key}"' for key in keys)})
             VALUES ({placeholders})
-            ON CONFLICT ({asyncpg.identifier(primary_key)}) DO UPDATE SET
-            {', '.join(f"{asyncpg.identifier(key)} = EXCLUDED.{asyncpg.identifier(key)}" for key in keys)}
-            ''', values)
+            ON CONFLICT ("{primary_key}") DO UPDATE SET
+            {update_set}
+            '''
+
+            # Convert all values to strings and execute the query
+            values = [[str(model.get(key, '')) for key in keys] for model in flattened_dict]
+            await conn.executemany(query, values)
 
 async def refresh_models() -> str:
     """
@@ -108,10 +114,13 @@ async def refresh_models() -> str:
         return f"Success! {len(flattened_models)} records processed."
     
     except aiohttp.ClientError as e:
-        logger.error("Error fetching models from API")
+        logger.error(f"Error fetching models from API: {e}")
+        raise
+    except asyncpg.PostgresError as e:
+        logger.error(f"Database error while refreshing models: {e}")
         raise
     except Exception as e:
-        logger.error("An unexpected error occurred while refreshing models")
+        logger.error(f"An unexpected error occurred while refreshing models: {e}")
         raise
 
 async def recreate_and_populate_table(flattened_dict: List[Dict[str, Any]], table: str) -> List[Dict[str, Any]]:
@@ -123,29 +132,30 @@ async def recreate_and_populate_table(flattened_dict: List[Dict[str, Any]], tabl
 
     try:
         keys = list(flattened_dict[0].keys())
-        columns = ', '.join(f"{asyncpg.identifier(key)} TEXT" for key in keys)
+        columns = ', '.join(f'"{key}" TEXT' for key in keys)
         primary_key = keys[0]
 
         pool = await get_db_pool()
         async with pool.acquire() as conn:
             async with conn.transaction():
-                await conn.execute(f'DROP TABLE IF EXISTS {asyncpg.identifier(table)}')
-                await conn.execute(f'CREATE TABLE {asyncpg.identifier(table)} ({columns}, PRIMARY KEY ({asyncpg.identifier(primary_key)}))')
+                await conn.execute(f'DROP TABLE IF EXISTS "{table}"')
+                await conn.execute(f'CREATE TABLE "{table}" ({columns}, PRIMARY KEY ("{primary_key}"))')
 
                 placeholders = ', '.join(f'${i+1}' for i in range(len(keys)))
                 values = [[model.get(key, '') for key in keys] for model in flattened_dict]
-                await conn.executemany(f'''
-                INSERT INTO {asyncpg.identifier(table)} ({', '.join(asyncpg.identifier(key) for key in keys)})
+                query = f'''
+                INSERT INTO "{table}" ({', '.join(f'"{key}"' for key in keys)})
                 VALUES ({placeholders})
-                ''', values)
+                '''
+                await conn.executemany(query, values)
 
         return flattened_dict
 
-    except PostgresError as e:
-        logger.error("Database error occurred while recreating and populating table")
+    except asyncpg.PostgresError as e:
+        logger.error(f"Database error occurred while recreating and populating table: {e}")
         raise
     except Exception as e:
-        logger.error("An unexpected error occurred while recreating and populating table")
+        logger.error(f"An unexpected error occurred while recreating and populating table: {e}")
         raise
 
 async def update_whitelist_table(whitelist_data: List[Dict[str, str]]) -> List[Dict[str, str]]:
