@@ -15,9 +15,11 @@ from typing import List, Dict, Optional, Any
 from contextlib import asynccontextmanager
 
 # Additional libraries
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader
+from pydantic import BaseModel, Field, validator
 import redis.asyncio as redis
 from openai import AsyncOpenAI
 
@@ -69,30 +71,32 @@ class Whitelist(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start cache invalidation listener
     task = asyncio.create_task(listen_for_cache_invalidation())
     yield
-    # Cleanup (if needed)
     task.cancel()
     await task
 
 app = FastAPI(lifespan=lifespan)
 
+# CORS setup
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Restrict this in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Redis client
-redis_client: redis.Redis = None
-
-# Cache expiration time
-CACHE_EXPIRATION = 86400  # 1 day
-
+# Redis setup
 @asynccontextmanager
 async def get_redis_client():
     client = redis.Redis(
         host=os.getenv('REDIS_HOST', 'localhost'),
         port=int(os.getenv('REDIS_PORT', 6379)),
-        password=os.getenv('REDIS_PASSWORD', 'password'),
+        password=os.getenv('REDIS_PASSWORD'),
         db=0
     )
     try:
@@ -100,8 +104,17 @@ async def get_redis_client():
     finally:
         await client.close()
 
-# Pub/Sub channel name
+CACHE_EXPIRATION = 86400  # 1 day
 CACHE_INVALIDATION_CHANNEL = "cache_invalidation"
+
+# Authentication
+API_KEY_NAME = "X-API-Key"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+
+async def get_api_key(api_key_header: str = Depends(api_key_header)):
+    if api_key_header == os.getenv("API_KEY"):
+        return api_key_header
+    raise HTTPException(status_code=403, detail="Could not validate credentials")
 
 # -------------------------------------------------------------------------------
 #
@@ -159,12 +172,30 @@ async def listen_for_cache_invalidation():
                     cache_key = message['data'].decode('utf-8')
                     logger.info(f"Cache invalidation for {cache_key}")
         except Exception as e:
-            logger.error(f"Error in cache invalidation listener: {str(e)}")
+            logger.error(f"Error in cache invalidation listener: {e}")
 
 client = AsyncOpenAI(
     base_url=os.getenv('OPENROUTER_API_BASE_URL'),
     api_key=os.getenv('OPENROUTER_API_KEY')
 )
+
+async def event_stream(request):
+    try:
+        if isinstance(request, ChatCompletionRequest):
+            stream = await client.chat.completions.create(**request.dict(exclude_unset=True))
+        else:
+            stream = await client.completions.create(**request.dict(exclude_unset=True))
+        
+        async for chunk in stream:
+            yield f"data: {chunk.json()}\n\n"
+            await asyncio.sleep(0)
+    except asyncio.CancelledError:
+        logger.info("Client disconnected")
+    except Exception as e:
+        logger.error(f"Streaming error: {e}")
+        yield f"data: {json.dumps({'error': 'Internal server error'})}\n\n"
+    finally:
+        logger.info("Streaming completed or interrupted")
 
 # -------------------------------------------------------------------------------
 #
@@ -174,38 +205,55 @@ client = AsyncOpenAI(
 
 @app.get("/api/v1/models")
 async def get_model_list():
-    cache_key = 'models'
-    models = await get_or_fetch_data(cache_key, get_models)
-    return {"data": models}
+    try:
+        cache_key = 'models'
+        models = await get_or_fetch_data(cache_key, get_models)
+        return {"data": models}
+    except Exception as e:
+        logger.error(f"Error fetching models: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/api/v1/models_complete")
 async def get_complete_model_list():
-    cache_key = 'models_complete'
-    models = await get_or_fetch_data(cache_key, get_all_models)
-    return {"data": models}
+    try:
+        cache_key = 'models_complete'
+        models = await get_or_fetch_data(cache_key, get_all_models)
+        return {"data": models}
+    except Exception as e:
+        logger.error(f"Error fetching complete model list: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/api/v1/models/update")
-async def update_models():
-    result = await refresh_models()
-    await invalidate_cache('models')
-    await invalidate_cache('models_complete')
-    return {"message": result}
+async def update_models(api_key: str = Depends(get_api_key)):
+    try:
+        result = await refresh_models()
+        await invalidate_cache('models')
+        await invalidate_cache('models_complete')
+        return {"message": "Models updated successfully"}
+    except Exception as e:
+        logger.error(f"Error updating models: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/api/v1/models/whitelist")
 async def get_white_list():
-    cache_key = 'whitelist'
-    whitelist = await get_or_fetch_data(cache_key, get_whitelist)
-    return {"data": whitelist}
+    try:
+        cache_key = 'whitelist'
+        whitelist = await get_or_fetch_data(cache_key, get_whitelist)
+        return {"data": whitelist}
+    except Exception as e:
+        logger.error(f"Error fetching whitelist: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.put("/api/v1/models/update_whitelist")
-async def update_white_list(whitelist: Whitelist):
-    result = await update_whitelist_table(whitelist.data)
-    if isinstance(result, list):
+async def update_white_list(whitelist: Whitelist, api_key: str = Depends(get_api_key)):
+    try:
+        result = await update_whitelist_table(whitelist.data)
         await invalidate_cache('whitelist')
         await invalidate_cache('models')
         return {"data": result}
-    else:
-        raise HTTPException(status_code=500, detail=f"Operation failed: {result}")
+    except Exception as e:
+        logger.error(f"Error updating whitelist: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/v1/chat/completions")
 async def get_chat_completions(request: Request):
@@ -214,27 +262,13 @@ async def get_chat_completions(request: Request):
         chat_request = ChatCompletionRequest(**data)
         
         if chat_request.stream:
-            async def event_stream():
-                try:
-                    stream = await client.chat.completions.create(**chat_request.dict(exclude_unset=True))
-                    async for chunk in stream:
-                        yield f"data: {chunk.json()}\n\n"
-                        await asyncio.sleep(0)  # Allow for task cancellation
-                except asyncio.CancelledError:
-                    logger.info("Client disconnected")
-                except Exception as e:
-                    logger.error(f"Streaming error: {str(e)}")
-                    yield f"data: {json.dumps({'error': str(e)})}\n\n"
-                finally:
-                    logger.info("Streaming completed or interrupted")
-
-            return StreamingResponse(event_stream(), media_type="text/event-stream")
+            return StreamingResponse(event_stream(chat_request), media_type="text/event-stream")
         else:
             response = await client.chat.completions.create(**chat_request.dict(exclude_unset=True))
             return JSONResponse(content=response.model_dump())
     except Exception as e:
-        logger.error(f"Error in chat completions: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error in chat completions: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/v1/completions")
 async def get_completion(request: Request):
@@ -242,33 +276,14 @@ async def get_completion(request: Request):
         data = await request.json()
         completion_request = CompletionRequest(**data)
         
-        request_data = completion_request.dict(exclude_unset=True)
-        if 'model' not in request_data or 'prompt' not in request_data:
-            raise ValueError("Both 'model' and 'prompt' are required.")
-        
         if completion_request.stream:
-            async def event_stream():
-                try:
-                    stream = await client.completions.create(**request_data)
-                    async for chunk in stream:
-                        chunk_data = chunk.model_dump()
-                        yield f"data: {json.dumps(chunk_data)}\n\n"
-                        await asyncio.sleep(0)
-                except asyncio.CancelledError:
-                    logger.info("Client disconnected")
-                except Exception as e:
-                    logger.error(f"Streaming error: {str(e)}")
-                    yield f"data: {json.dumps({'error': str(e)})}\n\n"
-                finally:
-                    logger.info("Streaming completed or interrupted")
-
-            return StreamingResponse(event_stream(), media_type="text/event-stream")
+            return StreamingResponse(event_stream(completion_request), media_type="text/event-stream")
         else:
-            response = await client.completions.create(**request_data)
+            response = await client.completions.create(**completion_request.dict(exclude_unset=True))
             return JSONResponse(content=response.model_dump())
     except ValueError as ve:
-        logger.error(f"Validation error: {str(ve)}")
-        raise HTTPException(status_code=400, detail=str(ve))
+        logger.error(f"Validation error: {ve}")
+        raise HTTPException(status_code=400, detail="Invalid request")
     except Exception as e:
-        logger.error(f"Error in completions: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error in completions: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
