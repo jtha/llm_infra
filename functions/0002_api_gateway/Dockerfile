@@ -1,6 +1,9 @@
 # Use a multi-arch base image
 FROM python:alpine
 
+# Add metadata to the image
+LABEL org.opencontainers.image.description="Multi-Arch API Gateway Service for LLM Infrastructure"
+
 # Set the working directory in the container
 WORKDIR /app
 

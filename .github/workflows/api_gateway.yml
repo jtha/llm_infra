@@ -50,7 +50,7 @@ jobs:
           outputs: |
             type=registry
             name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-            annotation-index.org.opencontainers.image.description=API Gateway Service for LLM Infrastructure
+            annotation-index.org.opencontainers.image.description="Multi-Arch API Gateway Service for LLM Infrastructure"
 
       - name: Wait for image to be available
         run: |
