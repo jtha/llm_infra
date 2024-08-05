@@ -22,7 +22,7 @@ import redis.asyncio as redis
 from openai import AsyncOpenAI
 
 # Local imports
-from db_util import get_models, get_whitelist, recreate_and_populate_table, refresh_models, update_whitelist_table, get_all_models
+from db_util import get_models, get_whitelist, refresh_models, update_whitelist_table, get_all_models
 
 # -------------------------------------------------------------------------------
 #

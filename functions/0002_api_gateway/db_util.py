@@ -1,16 +1,32 @@
+# -------------------------------------------------------------------------------
+#
+# Imports
+#
+# -------------------------------------------------------------------------------
+
+# Built-in libraries
 import os
 import logging
 from typing import List, Dict, Optional, Any, Union
+
+# Additional libraries
 import asyncpg
 import aiohttp
 from asyncpg.pool import Pool
 
-logger = logging.getLogger(__name__)
+# -------------------------------------------------------------------------------
+#
+# Initialization & Database Pool
+#
+# -------------------------------------------------------------------------------
 
-# Global connection pool
+logger = logging.getLogger(__name__)
 db_pool: Optional[Pool] = None
 
 async def get_db_pool() -> Pool:
+    """
+    Retrieves a connection pool to the PostgreSQL database, creating it if it does not exist.
+    """
     global db_pool
     if db_pool is None:
         try:
@@ -25,6 +41,12 @@ async def get_db_pool() -> Pool:
             logger.error(f"Failed to create database pool: {str(e)}")
             raise
     return db_pool
+
+# -------------------------------------------------------------------------------
+#
+# Functions
+#
+# -------------------------------------------------------------------------------
 
 def flatten_dict(nested_dicts: List[Dict[str, Any]], parent_key: str = '', sep: str = '_') -> List[Dict[str, Any]]:
     """
