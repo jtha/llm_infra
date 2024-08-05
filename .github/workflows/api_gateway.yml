@@ -50,7 +50,6 @@ jobs:
         id: build-and-push
         with:
           context: functions/0002_api_gateway
-          file: ./Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
