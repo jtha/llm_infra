@@ -1,7 +1,5 @@
 # -------------------------------------------------------------------------------
-#
 # Imports
-#
 # -------------------------------------------------------------------------------
 
 # Built-in libraries
@@ -11,7 +9,7 @@ import asyncio
 import logging
 import time
 from functools import wraps
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Union, Literal
 from contextlib import asynccontextmanager
 
 # Additional libraries
@@ -19,54 +17,71 @@ from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel
 import redis.asyncio as redis
 from openai import AsyncOpenAI
-
+import voyageai
+ 
 # Local imports
-from db_util import get_models, get_whitelist, refresh_models, update_whitelist_table, get_all_models
+from db_util import get_models, get_whitelist, refresh_models, update_whitelist_table, get_all_models, check_and_scrape_url
 
 # -------------------------------------------------------------------------------
-#
 # Pydantic Models
-#
 # -------------------------------------------------------------------------------
 
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[Dict[str, str]]
     stream: Optional[bool] = False
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
-    n: Optional[int] = None
+    temperature: Optional[float] = 0.5
+    top_p: Optional[float] = 1.0
+    n: Optional[int] = 1
     stop: Optional[List[str]] = None
     max_tokens: Optional[int] = None
-    presence_penalty: Optional[float] = None
-    frequency_penalty: Optional[float] = None
+    presence_penalty: Optional[float] = 0.0
+    frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
+    logprobs: Optional[bool] = False
+    top_logprobs: Optional[int] = None
+    response_format: Optional[Dict[str, Any]] = None
+    seed: Optional[int] = None
+    service_tier: Optional[str] = None
+    tools: Optional[List[Dict[str, Any]]] = None
+    tool_choice: Optional[Dict[str, Any]] = None
+    parallel_tool_calls: Optional[bool] = True
+    function_call: Optional[Dict[str, Any]] = None
 
 class CompletionRequest(BaseModel):
     model: str
-    prompt: str
+    prompt: Union[str, List[str]] 
     stream: Optional[bool] = False
     max_tokens: Optional[int] = None
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
-    n: Optional[int] = None
+    temperature: Optional[float] = 0.5
+    top_p: Optional[float] = 1.0
+    n: Optional[int] = 1
+    best_of: Optional[int] = 1
+    echo: Optional[bool] = False
     stop: Optional[List[str]] = None
-    presence_penalty: Optional[float] = None
-    frequency_penalty: Optional[float] = None
+    presence_penalty: Optional[float] = 0.0
+    frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
+    logprobs: Optional[int] = None
+    seed: Optional[int] = None
     user: Optional[str] = None
+    suffix: Optional[str] = None
+
+
 
 class Whitelist(BaseModel):
     data: List[Dict[str, str]] = [{'id': '', 'provider': ''}]
 
+class ScrapeRequest(BaseModel):
+    url: str
+    force_scrape: Optional[bool] = False
+
 # -------------------------------------------------------------------------------
-#
 # Initialization
-#
 # -------------------------------------------------------------------------------
 
 @asynccontextmanager
@@ -104,7 +119,7 @@ async def get_redis_client():
     finally:
         await client.close()
 
-CACHE_EXPIRATION = 86400  # 1 day
+CACHE_EXPIRATION = 86400  # 1 day in seconds
 CACHE_INVALIDATION_CHANNEL = "cache_invalidation"
 
 # Authentication
@@ -116,10 +131,10 @@ async def get_api_key(api_key_header: str = Depends(api_key_header)):
         return api_key_header
     raise HTTPException(status_code=403, detail="Could not validate credentials")
 
+
+
 # -------------------------------------------------------------------------------
-#
 # Utility functions
-#
 # -------------------------------------------------------------------------------
 
 def timing_decorator(func):
@@ -198,9 +213,7 @@ async def event_stream(request):
         logger.info("Streaming completed or interrupted")
 
 # -------------------------------------------------------------------------------
-#
 # API endpoints
-#
 # -------------------------------------------------------------------------------
 
 @app.get("/api/v1/models")
@@ -287,3 +300,13 @@ async def get_completion(request: Request):
     except Exception as e:
         logger.error(f"Error in completions: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/api/v1/scrape")
+async def scrape_url_endpoint(request: ScrapeRequest):
+    try:
+        result = await check_and_scrape_url(request.url, request.force_scrape)
+        return JSONResponse(content=result)
+    except Exception as e:
+        logger.error(f"Error scraping URL: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    
