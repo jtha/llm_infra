@@ -23,7 +23,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     permissions:
       contents: read
@@ -60,7 +60,7 @@ jobs:
             ${{ runner.os }}-buildx-
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         id: build-and-push
         with:
           context: functions/0002_api_gateway
@@ -73,8 +73,6 @@ jobs:
           outputs: |
             type=registry
             name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          annotations: |
-            org.opencontainers.image.description=Multi-Arch API Gateway Service for LLM Infrastructure
 
       - name: Move cache
         run: |

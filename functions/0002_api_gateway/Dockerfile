@@ -7,14 +7,16 @@ LABEL org.opencontainers.image.description="Multi-Arch API Gateway Service for L
 # Set the working directory in the container
 WORKDIR /app
 
-# Copy the current directory contents into the container at /app
-COPY . /app
+# Copy only the requirements file first to leverage Docker cache
+COPY requirements.txt .
 
-# Upgrade pip and setuptools to the latest versions
-RUN pip install --no-cache-dir --upgrade pip setuptools
+# Upgrade pip, install dependencies, and remove cache in a single layer
+RUN pip install --no-cache-dir --upgrade pip setuptools && \
+    pip install --no-cache-dir -r requirements.txt && \
+    rm -rf /root/.cache/pip
 
-# Install any needed packages specified in requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy the rest of the application code
+COPY . .
 
 # Make port 8000 available to the world outside this container
 EXPOSE 8000
