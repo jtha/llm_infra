@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tei-deployment
+  labels:
+    app: tei
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tei
+  template:
+    metadata:
+      labels:
+        app: tei
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - homelab
+                - hosthatch-1
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - homelab
+          - weight: 50
+            preference:
+              matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - hosthatch-1
+      containers:
+      - name: tei-embedding
+        image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.5
+        ports:
+        - containerPort: 8080
+        env:
+        - name: MODEL_ID
+          value: "Snowflake/snowflake-arctic-embed-m-v1.5"
+        - name: HF_HOME
+          value: "/data/embedding"
+        resources:
+          requests:
+            cpu: "1"
+            memory: "1Gi"
+          limits:
+            cpu: "2"
+            memory: "2Gi"
+        volumeMounts:
+        - name: model-storage
+          mountPath: /data/embedding
+      - name: tei-reranking
+        image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.5
+        ports:
+        - containerPort: 8081
+        env:
+        - name: MODEL_ID
+          value: "cross-encoder/ms-marco-MiniLM-L-12-v2"
+        - name: HF_HOME
+          value: "/data/reranking"
+        resources:
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+        volumeMounts:
+        - name: model-storage
+          mountPath: /data/reranking
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: tei-model-storage

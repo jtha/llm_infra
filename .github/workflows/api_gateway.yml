@@ -7,6 +7,7 @@ on:
     paths:
       - 'functions/0002_api_gateway/main.py'
       - 'functions/0002_api_gateway/db_util.py'
+      - 'functions/0002_api_gateway/docs_processing.py'
       - 'functions/0002_api_gateway/requirements.txt'
       - 'functions/0002_api_gateway/Dockerfile'
   workflow_dispatch:
