@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools && \
     rm -rf /root/.cache/pip
 
 # Copy the rest of the application code
-COPY . .
+COPY . /app
 
 # Make port 8000 available to the world outside this container
 EXPOSE 8000
