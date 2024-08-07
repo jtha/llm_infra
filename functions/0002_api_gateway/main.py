@@ -11,16 +11,16 @@ import time
 from functools import wraps
 from typing import List, Dict, Optional, Any, Union, Literal
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
 # Additional libraries
-from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi import FastAPI, HTTPException, Request, Depends, Body
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 import redis.asyncio as redis
 from openai import AsyncOpenAI
-import voyageai
  
 # Local imports
 from db_util import get_models, get_whitelist, refresh_models, update_whitelist_table, get_all_models, check_and_scrape_url
@@ -136,6 +136,14 @@ async def get_api_key(api_key_header: str = Depends(api_key_header)):
 # -------------------------------------------------------------------------------
 # Utility functions
 # -------------------------------------------------------------------------------
+
+def is_valid_url(url: str) -> bool:
+    """Check if the provided URL is valid."""
+    try:
+        result = urlparse(url)
+        return all([result.scheme, result.netloc])
+    except ValueError:
+        return False
 
 def timing_decorator(func):
     """Decorator to log the execution time of an asynchronous function."""
@@ -302,8 +310,10 @@ async def get_completion(request: Request):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/v1/scrape")
-async def scrape_url_endpoint(request: ScrapeRequest):
+async def scrape_url_endpoint(request: ScrapeRequest = Body(..., max_length=1000)):
     try:
+        if not is_valid_url(request.url):
+            raise HTTPException(status_code=400, detail="Invalid URL format")
         result = await check_and_scrape_url(request.url, request.force_scrape)
         return JSONResponse(content=result)
     except Exception as e:

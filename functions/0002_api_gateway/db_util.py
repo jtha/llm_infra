@@ -14,6 +14,7 @@ import asyncpg
 import aiohttp
 from asyncpg.pool import Pool
 from asyncpg.exceptions import PostgresError
+from fastapi import HTTPException
 import voyageai
 from pydantic import BaseModel
 
@@ -332,7 +333,13 @@ async def check_and_scrape_url(url: str, force_scrape: bool = False) -> Dict[str
 
             return {"message": f"Scraped {url} and indexed {len(embeddings)} chunks"}
 
+        except asyncpg.PostgresError as e:
+            logger.error(f"Database error while scraping {url}: {e}")
+            raise HTTPException(status_code=500, detail="Database error occurred")
+        except aiohttp.ClientError as e:
+            logger.error(f"Network error while scraping {url}: {e}")
+            raise HTTPException(status_code=503, detail="Error fetching the URL")
         except Exception as e:
-            logger.error(f"Error during embedding or indexing for {url}: {str(e)}")
-            return {"message": "An error occurred during processing."}
+            logger.error(f"Unexpected error while scraping {url}: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error")
 

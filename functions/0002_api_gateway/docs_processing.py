@@ -9,6 +9,7 @@ from copy import deepcopy
 import os
 import json
 import logging
+import time
 
 # Additional libraries
 from trafilatura import fetch_url, extract
@@ -119,69 +120,81 @@ def split_chunk_by_paragraph(chunk: str, max_words: int) -> List[str]:
     
     return chunks
 
-def split_markdown(text: str, max_words: int = 500) -> List[str]:
+def split_markdown(text: str, max_words: int = 500, timeout: float = 5.0) -> List[str]:
     """Split a markdown text into chunks based on headers and content, 
     ensuring that each chunk does not exceed the specified maximum word count."""
-    header_pattern = r'^(#+)\s+(.+)$'
-    sections = re.split(header_pattern, text, flags=re.MULTILINE)
-    
-    chunks = []
-    current_chunk = sections[0]
-    current_header_level = 0
-    
-    for i in range(1, len(sections), 3):
-        header_level = len(sections[i])
-        header = sections[i+1]
-        content = sections[i+2] if i+2 < len(sections) else ""
-        
-        section = f"{'#' * header_level} {header}\n\n{content.strip()}"
-        
-        if (word_count(current_chunk + '\n\n' + section) <= max_words and 
-            header_level >= current_header_level):
-            current_chunk += '\n\n' + section
-            current_header_level = max(current_header_level, header_level)
-        else:
-            if current_chunk:
-                if word_count(current_chunk) > max_words:
-                    chunks.extend(split_chunk_by_paragraph(current_chunk, max_words))
-                else:
-                    chunks.append(current_chunk.strip())
-            current_chunk = section
-            current_header_level = header_level
-    
-    if current_chunk:
-        if word_count(current_chunk) > max_words:
-            chunks.extend(split_chunk_by_paragraph(current_chunk, max_words))
-        else:
-            chunks.append(current_chunk.strip())
+    header_pattern = re.compile(r'^(#+)\s+(.+)$', re.MULTILINE)
+    start_time = time.time()
 
-    combined_chunks = []
-    temp_chunk = ""
-    temp_header_level = 0
+    def split_with_timeout():
+        sections = header_pattern.split(text)
     
-    for chunk in chunks:
-        chunk_header_match = re.match(r'^(#+)', chunk)
-        chunk_header_level = len(chunk_header_match.group(1)) if chunk_header_match else 0
+        chunks = []
+        current_chunk = sections[0]
+        current_header_level = 0
         
-        if (word_count(temp_chunk + '\n\n' + chunk) <= max_words and 
-            (chunk_header_level == 0 or chunk_header_level >= temp_header_level)):
-            temp_chunk += '\n\n' + chunk
-            temp_header_level = max(temp_header_level, chunk_header_level)
-        else:
-            if temp_chunk:
-                if word_count(temp_chunk) > max_words:
-                    combined_chunks.extend(split_chunk_by_paragraph(temp_chunk, max_words))
-                else:
-                    combined_chunks.append(temp_chunk.strip())
-            temp_chunk = chunk
-            temp_header_level = chunk_header_level
+        for i in range(1, len(sections), 3):
+            header_level = len(sections[i])
+            header = sections[i+1]
+            content = sections[i+2] if i+2 < len(sections) else ""
+            
+            section = f"{'#' * header_level} {header}\n\n{content.strip()}"
+            
+            if (word_count(current_chunk + '\n\n' + section) <= max_words and 
+                header_level >= current_header_level):
+                current_chunk += '\n\n' + section
+                current_header_level = max(current_header_level, header_level)
+            else:
+                if current_chunk:
+                    if word_count(current_chunk) > max_words:
+                        chunks.extend(split_chunk_by_paragraph(current_chunk, max_words))
+                    else:
+                        chunks.append(current_chunk.strip())
+                current_chunk = section
+                current_header_level = header_level
+        
+        if current_chunk:
+            if word_count(current_chunk) > max_words:
+                chunks.extend(split_chunk_by_paragraph(current_chunk, max_words))
+            else:
+                chunks.append(current_chunk.strip())
+
+        combined_chunks = []
+        temp_chunk = ""
+        temp_header_level = 0
+        
+        for chunk in chunks:
+            chunk_header_match = re.match(r'^(#+)', chunk)
+            chunk_header_level = len(chunk_header_match.group(1)) if chunk_header_match else 0
+            
+            if (word_count(temp_chunk + '\n\n' + chunk) <= max_words and 
+                (chunk_header_level == 0 or chunk_header_level >= temp_header_level)):
+                temp_chunk += '\n\n' + chunk
+                temp_header_level = max(temp_header_level, chunk_header_level)
+            else:
+                if temp_chunk:
+                    if word_count(temp_chunk) > max_words:
+                        combined_chunks.extend(split_chunk_by_paragraph(temp_chunk, max_words))
+                    else:
+                        combined_chunks.append(temp_chunk.strip())
+                temp_chunk = chunk
+                temp_header_level = chunk_header_level
+        
+        if temp_chunk:
+            if word_count(temp_chunk) > max_words:
+                combined_chunks.extend(split_chunk_by_paragraph(temp_chunk, max_words))
+            else:
+                combined_chunks.append(temp_chunk.strip())
+        
+        final_chunks = [remove_numbers_in_brackets(chunk) for chunk in combined_chunks if chunk.strip()]
+        
+        if time.time() - start_time > timeout:
+            raise TimeoutError("Markdown splitting timed out")
+
+        return final_chunks
     
-    if temp_chunk:
-        if word_count(temp_chunk) > max_words:
-            combined_chunks.extend(split_chunk_by_paragraph(temp_chunk, max_words))
-        else:
-            combined_chunks.append(temp_chunk.strip())
-    
-    final_chunks = [remove_numbers_in_brackets(chunk) for chunk in combined_chunks if chunk.strip()]
-    
-    return final_chunks
+    try:
+        return split_with_timeout()
+    except TimeoutError:
+        logger.warning("Markdown splitting timed out")
+        return [text[:max_words]]
