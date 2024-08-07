@@ -1,8 +1,9 @@
 # Use a multi-arch base image
-FROM python:alpine
+FROM python:3.9-alpine
 
 # Add metadata to the image
-LABEL org.opencontainers.image.description="Multi-Arch API Gateway Service for LLM Infrastructure"
+LABEL org.opencontainers.image.source=https://github.com/jtha/llm_infra
+LABEL org.opencontainers.image.description='Multi-Arch API Gateway Service for LLM Infrastructure'
 
 # Set the working directory in the container
 WORKDIR /app
@@ -16,7 +17,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools && \
     rm -rf /root/.cache/pip
 
 # Copy the rest of the application code
-COPY . /app
+COPY . .
 
 # Make port 8000 available to the world outside this container
 EXPOSE 8000
