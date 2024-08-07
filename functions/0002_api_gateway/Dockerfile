@@ -1,5 +1,5 @@
 # Use a multi-arch base image
-FROM python:3.9-alpine
+FROM python:alpine
 
 # Add metadata to the image
 LABEL org.opencontainers.image.source=https://github.com/jtha/llm_infra

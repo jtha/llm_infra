@@ -310,7 +310,7 @@ async def get_completion(request: Request):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/v1/scrape")
-async def scrape_url_endpoint(request: ScrapeRequest = Body(..., max_length=1000)):
+async def scrape_url_endpoint(request: ScrapeRequest):
     try:
         if not is_valid_url(request.url):
             raise HTTPException(status_code=400, detail="Invalid URL format")

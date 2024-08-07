@@ -8,6 +8,8 @@ import logging
 from typing import List, Dict, Optional, Any, Literal
 from enum import Enum, auto
 from contextlib import asynccontextmanager
+from datetime import datetime
+import json
 
 # Additional libraries
 import asyncpg
@@ -263,40 +265,42 @@ async def get_whitelist() -> List[Dict[str, Any]]:
 # -------------------------------------------------------------------------------
 
 async def check_and_scrape_url(url: str, force_scrape: bool = False) -> Dict[str, Any]:
+    logger.info(f"Received request to scrape URL: {url} with force_scrape={force_scrape}")
     pool = await get_db_pool(preset="WEB_SCRAPE")
     async with pool.acquire() as conn:
         existing_data = await conn.fetchrow(
-            "SELECT * FROM scraped_url WHERE source = $1",
+            "SELECT * FROM scraped_url WHERE url = $1",
             url
         )
 
         if existing_data and not force_scrape:
             return {"message": f"{url} already scraped"}
 
-        scraped_data = await scrape_url(url)
+        scraped_data = scrape_url(url)
+        logger.info(f"Scraped data: {scraped_data}")
         
         data = {
-            'title': scraped_data['metadata'].get('title', ''),
-            'author': scraped_data['metadata'].get('author', ''),
-            'hostname': scraped_data['metadata'].get('hostname', ''),
-            'date': scraped_data['metadata'].get('date', ''),
-            'fingerprint': scraped_data['metadata'].get('fingerprint', ''),
-            'license': scraped_data['metadata'].get('license', ''),
-            'pagetype': scraped_data['metadata'].get('pagetype', ''),
-            'filedate': scraped_data['metadata'].get('filedate', ''),
+            'title': scraped_data['title'],
+            'author': scraped_data['author'],
+            'hostname': scraped_data['hostname'],
+            'date': datetime.strptime(scraped_data['date'], '%Y-%m-%d'),
+            'fingerprint': scraped_data['fingerprint'],
+            'license': scraped_data['license'],
+            'pagetype': scraped_data['pagetype'],
+            'filedate': datetime.strptime(scraped_data['filedate'], '%Y-%m-%d'),
             'url': url,
-            'source_hostname': scraped_data['metadata'].get('source_hostname', ''),
-            'text_markdown': scraped_data['content']
+            'source_hostname': scraped_data['source_hostname'],
+            'text_markdown': scraped_data['text_markdown']
         }
 
         await conn.execute("""
             INSERT INTO scraped_url (
                 title, author, hostname, date, fingerprint, license, pagetype, 
                 filedate, url, source_hostname, text_markdown
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (url) DO UPDATE SET
                 title = $1, author = $2, hostname = $3, date = $4, fingerprint = $5,
-                license = $6, pagetype = $7, filedate = $8, source_hostname = $10,
+                license = $6, pagetype = $7, filedate = $8, url = $9, source_hostname = $10,
                 text_markdown = $11
         """, data['title'], data['author'], data['hostname'], data['date'],
             data['fingerprint'], data['license'], data['pagetype'], data['filedate'],
@@ -309,29 +313,30 @@ async def check_and_scrape_url(url: str, force_scrape: bool = False) -> Dict[str
             return {"message": f"Scraped {url}, but no content to index"}
 
         try:
-            embeddings = await vo.embed(EmbedRequest(texts=chunks, input_type='document'))
-            if len(embeddings) != len(chunks):
+            results = await vo.embed(texts=chunks, input_type='document', model='voyage-large-2-instruct')
+            if len(results.embeddings) != len(chunks):
                 logger.error(f"Mismatch between chunks and embeddings for {url}")
                 return {"message": f"Error: Mismatch between chunks and embeddings for {url}"}
 
-            for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+            for i, (chunk, embedding) in enumerate(zip(chunks, results.embeddings)):
                 if not embedding:
                     logger.warning(f"Empty embedding for chunk {i} of {url}")
                     continue
 
                 chunk_index = f"{url}_{i}"
                 word_count = len(chunk.split())
+                embedding_str = f"[{','.join(map(str, embedding))}]"
 
                 await conn.execute("""
                 INSERT INTO chunk_embeddings (url, chunk_index, chunk, embedding_voyage, word_count, filedate)
                 VALUES ($1, $2, $3, $4, $5, $6)
-                ON CONFLICT (url, chunk_index) DO UPDATE SET
+                ON CONFLICT (chunk_index) DO UPDATE SET
                     chunk = EXCLUDED.chunk,
                     embedding_voyage = EXCLUDED.embedding_voyage,
                     filedate = EXCLUDED.filedate
-                """, url, chunk_index, chunk, embedding, word_count, data['filedate'])
+                """, url, chunk_index, chunk, embedding_str, word_count, data['filedate'])
 
-            return {"message": f"Scraped {url} and indexed {len(embeddings)} chunks"}
+            return {"message": f"Scraped {url} and indexed {len(results.embeddings)} chunks"}
 
         except asyncpg.PostgresError as e:
             logger.error(f"Database error while scraping {url}: {e}")
