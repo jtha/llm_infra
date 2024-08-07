@@ -64,7 +64,7 @@ jobs:
             type=registry
             name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           annotations: |
-            org.opencontainers.image.description: "Multi-Arch API Gateway Service for LLM Infrastructure"
+            org.opencontainers.image.description="Multi-Arch API Gateway Service for LLM Infrastructure"
       
       - name: Attest
         uses: actions/attest-build-provenance@v1
