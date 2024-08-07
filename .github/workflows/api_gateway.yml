@@ -70,10 +70,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
-          outputs: |
-            type=registry
-            name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-            "annotation-index.org.opencontainers.image.description=Multi-Arch API Gateway Service for LLM Infrastructure"
+          outputs: type=registry, name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}, "annotation-index.org.opencontainers.image.description=Multi-Arch API Gateway Service for LLM Infrastructure"
 
       - name: Move cache
         run: |
