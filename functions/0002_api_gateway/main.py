@@ -9,21 +9,31 @@ import asyncio
 import logging
 import time
 from functools import wraps
-from typing import List, Dict, Optional, Any, Union, Literal
+from typing import List, Dict, Optional, Any, Union
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
 # Additional libraries
-from fastapi import FastAPI, HTTPException, Request, Depends, Body
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 import redis.asyncio as redis
 from openai import AsyncOpenAI
+
+from opentelemetry import trace
+from opentelemetry import context
+from opentelemetry.trace.status import Status, StatusCode
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.instrumentation.asgi import OpenTelemetryMiddleware
  
 # Local imports
 from db_util import get_models, get_whitelist, refresh_models, update_whitelist_table, get_all_models, check_and_scrape_url
+
 
 # -------------------------------------------------------------------------------
 # Pydantic Models
@@ -71,8 +81,6 @@ class CompletionRequest(BaseModel):
     user: Optional[str] = None
     suffix: Optional[str] = None
 
-
-
 class Whitelist(BaseModel):
     data: List[Dict[str, str]] = [{'id': '', 'provider': ''}]
 
@@ -84,14 +92,46 @@ class ScrapeRequest(BaseModel):
 # Initialization
 # -------------------------------------------------------------------------------
 
+# Telemetry configuration
+    # Assumes OTEL_SERVICE_NAME, OTEL_RESOURCE_ATTRIBUTES, OTEL_EXPORTER_OTLP_ENDPOINT, and OTEL_EXPORTER_OTLP_PROTOCOL are set in the environment
+    # OTEL_SERVICE_NAME - The name of your application. The service name will be available as attributes for traces, metrics, and logs.
+    # OTEL_RESOURCE_ATTRIBUTES - A comma-separated list of key=value pairs that describe the resource. Grafana Cloud requires 'deployment.environment', 'service.namespace', 'service.version', and 'service.instance.id' to be set
+    # OTEL_EXPORTER_OTLP_ENDPOINT - The endpoint of the Grafana Alloy instance
+    # OTEL_EXPORTER_OTLP_PROTOCOL - The protocol to use for exporting traces. Valid values are "grpc" and "http"
+
+trace.set_tracer_provider(TracerProvider())
+otlp_exporter = OTLPSpanExporter()
+span_processor = BatchSpanProcessor(otlp_exporter)
+trace.get_tracer_provider().add_span_processor(span_processor)
+
+# Lifespan management
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     task = asyncio.create_task(listen_for_cache_invalidation())
     yield
     task.cancel()
     await task
+    await trace.get_tracer_provider().shutdown()
 
+# FastAPI app and instrumentation initialization
 app = FastAPI(lifespan=lifespan)
+
+# Custom ASGI middleware to selectively apply instrumentation
+class SelectiveOpenTelemetryMiddleware(OpenTelemetryMiddleware):
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"] in ["/api/v1/chat/completions", "/api/v1/completions"]:
+            # For streaming endpoints, skip the default instrumentation
+            return await self.app(scope, receive, send)
+        # For all other endpoints, apply the default instrumentation
+        return await super().__call__(scope, receive, send)
+
+# Apply our custom middleware
+app.add_middleware(SelectiveOpenTelemetryMiddleware)
+
+# Apply FastAPI instrumentation, but exclude our streaming endpoints
+FastAPIInstrumentor.instrument_app(app, excluded_urls="/api/v1/chat/completions,/api/v1/completions")
+
+tracer = trace.get_tracer(__name__)
 
 # CORS setup
 app.add_middleware(
@@ -102,6 +142,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -130,8 +171,6 @@ async def get_api_key(api_key_header: str = Depends(api_key_header)):
     if api_key_header == os.getenv("API_KEY"):
         return api_key_header
     raise HTTPException(status_code=403, detail="Could not validate credentials")
-
-
 
 # -------------------------------------------------------------------------------
 # Utility functions
@@ -202,23 +241,55 @@ client = AsyncOpenAI(
     api_key=os.getenv('OPENROUTER_API_KEY')
 )
 
-async def event_stream(request):
-    try:
-        if isinstance(request, ChatCompletionRequest):
-            stream = await client.chat.completions.create(**request.dict(exclude_unset=True))
-        else:
-            stream = await client.completions.create(**request.dict(exclude_unset=True))
+async def event_stream(request, parent_context):
+    with tracer.start_as_current_span("event_stream", context=parent_context) as span:
+        span.set_attribute("request_type", type(request).__name__)
+        span.set_attribute("streaming", True)
         
-        async for chunk in stream:
-            yield f"data: {chunk.json()}\n\n"
-            await asyncio.sleep(0)
-    except asyncio.CancelledError:
-        logger.info("Client disconnected")
-    except Exception as e:
-        logger.error(f"Streaming error: {e}")
-        yield f"data: {json.dumps({'error': 'Internal server error'})}\n\n"
-    finally:
-        logger.info("Streaming completed or interrupted")
+        start_time = time.time()
+        chunk_count = 0
+        total_tokens = 0
+        
+        try:
+            if isinstance(request, ChatCompletionRequest):
+                stream = await client.chat.completions.create(**request.dict(exclude_unset=True))
+            else:
+                stream = await client.completions.create(**request.dict(exclude_unset=True))
+            
+            async for chunk in stream:
+                chunk_count += 1
+                chunk_data = json.loads(chunk.json())
+                total_tokens += len(chunk_data.get('choices', [{}])[0].get('delta', {}).get('content', '').split())
+                
+                if chunk_count % 100 == 0:  # Log every 100 chunks
+                    span.add_event("stream_progress", {
+                        "chunk_count": chunk_count,
+                        "total_tokens": total_tokens
+                    })
+                
+                yield f"data: {chunk.json()}\n\n"
+                await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            logger.info("Client disconnected")
+            span.add_event("stream_cancelled")
+        except Exception as e:
+            logger.error(f"Streaming error: {e}")
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR, str(e)))
+            yield f"data: {json.dumps({'error': 'Internal server error'})}\n\n"
+        finally:
+            end_time = time.time()
+            duration = end_time - start_time
+            
+            span.set_attribute("total_chunks", chunk_count)
+            span.set_attribute("total_tokens", total_tokens)
+            span.set_attribute("duration_seconds", duration)
+            
+            span.add_event("stream_completed", {
+                "total_chunks": chunk_count,
+                "total_tokens": total_tokens,
+                "duration_seconds": duration
+            })
 
 # -------------------------------------------------------------------------------
 # API endpoints
@@ -226,13 +297,15 @@ async def event_stream(request):
 
 @app.get("/api/v1/models")
 async def get_model_list():
-    try:
-        cache_key = 'models'
-        models = await get_or_fetch_data(cache_key, get_models)
-        return {"data": models}
-    except Exception as e:
-        logger.error(f"Error fetching models: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    with tracer.start_as_current_span("get_model_list"):
+        try:
+            cache_key = 'models'
+            with tracer.start_as_current_span("get_or_fetch_data"):
+                models = await get_or_fetch_data(cache_key, get_models)
+                return {"data": models}
+        except Exception as e:
+            logger.error(f"Error fetching models: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/api/v1/models_complete")
 async def get_complete_model_list():
@@ -278,36 +351,52 @@ async def update_white_list(whitelist: Whitelist, api_key: str = Depends(get_api
 
 @app.post("/api/v1/chat/completions")
 async def get_chat_completions(request: Request):
-    try:
-        data = await request.json()
-        chat_request = ChatCompletionRequest(**data)
-        
-        if chat_request.stream:
-            return StreamingResponse(event_stream(chat_request), media_type="text/event-stream")
-        else:
-            response = await client.chat.completions.create(**chat_request.dict(exclude_unset=True))
-            return JSONResponse(content=response.model_dump())
-    except Exception as e:
-        logger.error(f"Error in chat completions: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    with tracer.start_as_current_span("get_chat_completions") as span:
+        try:
+            data = await request.json()
+            chat_request = ChatCompletionRequest(**data)
+            span.set_attribute("model", chat_request.model)
+            span.set_attribute("streaming", chat_request.stream)
+            
+            if chat_request.stream:
+                current_context = context.get_current()
+                return StreamingResponse(event_stream(chat_request, current_context), media_type="text/event-stream")
+            else:
+                response = await client.chat.completions.create(**chat_request.dict(exclude_unset=True))
+                span.set_attribute("total_tokens", response.usage.total_tokens)
+                return JSONResponse(content=response.model_dump())
+        except Exception as e:
+            logger.error(f"Error in chat completions: {e}")
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR, str(e)))
+            raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/v1/completions")
 async def get_completion(request: Request):
-    try:
-        data = await request.json()
-        completion_request = CompletionRequest(**data)
-        
-        if completion_request.stream:
-            return StreamingResponse(event_stream(completion_request), media_type="text/event-stream")
-        else:
-            response = await client.completions.create(**completion_request.dict(exclude_unset=True))
-            return JSONResponse(content=response.model_dump())
-    except ValueError as ve:
-        logger.error(f"Validation error: {ve}")
-        raise HTTPException(status_code=400, detail="Invalid request")
-    except Exception as e:
-        logger.error(f"Error in completions: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    with tracer.start_as_current_span("get_completion") as span:
+        try:
+            data = await request.json()
+            completion_request = CompletionRequest(**data)
+            span.set_attribute("model", completion_request.model)
+            span.set_attribute("streaming", completion_request.stream)
+            
+            if completion_request.stream:
+                current_context = context.get_current()
+                return StreamingResponse(event_stream(completion_request, current_context), media_type="text/event-stream")
+            else:
+                response = await client.completions.create(**completion_request.dict(exclude_unset=True))
+                span.set_attribute("total_tokens", response.usage.total_tokens)
+                return JSONResponse(content=response.model_dump())
+        except ValueError as ve:
+            logger.error(f"Validation error: {ve}")
+            span.record_exception(ve)
+            span.set_status(Status(StatusCode.ERROR, str(ve)))
+            raise HTTPException(status_code=400, detail="Invalid request")
+        except Exception as e:
+            logger.error(f"Error in completions: {e}")
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR, str(e)))
+            raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/v1/scrape")
 async def scrape_url_endpoint(request: ScrapeRequest):
